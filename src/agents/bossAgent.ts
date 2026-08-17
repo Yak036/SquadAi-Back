@@ -1,4 +1,4 @@
-import { env } from "../config/env.js";
+import { getSettings } from "../services/configService.js";
 import type { PlanResult, QaResult, WorkerFile } from "../types.js";
 import { AppError } from "../utils/errors.js";
 import { chatJson } from "./llm.js";
@@ -8,6 +8,7 @@ Analizas un requerimiento y el árbol del workspace, y divides el trabajo en arc
 
 Responde ÚNICAMENTE un JSON (sin markdown) con esta forma:
 {
+  "understanding": "qué entendiste que hay que construir, en 1-3 frases",
   "summary": "resumen corto del plan",
   "files": [
     {
@@ -53,7 +54,11 @@ function asPlan(raw: unknown): PlanResult {
   if (mapped.length === 0 || mapped.some((f) => !f.filepath || !f.specification)) {
     throw new AppError("El Jefe no devolvió archivos utilizables", 502);
   }
-  return { summary: String(o.summary ?? ""), files: mapped };
+  return {
+    understanding: String(o.understanding ?? ""),
+    summary: String(o.summary ?? ""),
+    files: mapped,
+  };
 }
 
 function asQa(raw: unknown, fallbackPath: string): QaResult {
@@ -69,9 +74,10 @@ function asQa(raw: unknown, fallbackPath: string): QaResult {
 export async function planWork(input: {
   requirement: string;
   tree: string;
-}): Promise<PlanResult> {
-  const raw = await chatJson<unknown>({
-    model: env.bossModel,
+  signal?: AbortSignal;
+}): Promise<{ plan: PlanResult; reasoning: string }> {
+  const chat: Parameters<typeof chatJson>[0] = {
+    model: getSettings().bossModel,
     messages: [
       { role: "system", content: PLAN_SYSTEM },
       {
@@ -79,17 +85,20 @@ export async function planWork(input: {
         content: `REQUERIMIENTO:\n${input.requirement}\n\nÁRBOL DEL WORKSPACE:\n${input.tree}`,
       },
     ],
-  });
-  return asPlan(raw);
+  };
+  if (input.signal) chat.signal = input.signal;
+  const { data, reasoning } = await chatJson<unknown>(chat);
+  return { plan: asPlan(data), reasoning };
 }
 
 export async function reviewCode(input: {
   requirement: string;
   specification: string;
   generated: WorkerFile;
+  signal?: AbortSignal;
 }): Promise<QaResult> {
-  const raw = await chatJson<unknown>({
-    model: env.bossModel,
+  const chat: Parameters<typeof chatJson>[0] = {
+    model: getSettings().bossModel,
     messages: [
       { role: "system", content: QA_SYSTEM },
       {
@@ -102,6 +111,8 @@ export async function reviewCode(input: {
         ].join("\n\n"),
       },
     ],
-  });
-  return asQa(raw, input.generated.filepath);
+  };
+  if (input.signal) chat.signal = input.signal;
+  const { data } = await chatJson<unknown>(chat);
+  return asQa(data, input.generated.filepath);
 }

@@ -3,9 +3,11 @@
  * Todo intercambio entre agentes debe caber en estos tipos.
  */
 
+import type { TraceEvent } from "./utils/logger.js";
+
 export type FileAction = "create" | "modify";
 export type ChangeAction = "created" | "modified";
-export type JobStatus = "success" | "partial" | "failed";
+export type JobStatus = "success" | "partial" | "failed" | "cancelled";
 
 /** Permisos que el frontend/CLI puede conceder por job. */
 export type AgentPermissions = {
@@ -22,6 +24,8 @@ export type PlannedFile = {
 };
 
 export type PlanResult = {
+  /** Qué entendió el Jefe del requerimiento. */
+  understanding: string;
   summary: string;
   files: PlannedFile[];
 };
@@ -41,6 +45,15 @@ export type FileChange = {
   action: ChangeAction;
   file: string;
   path: string;
+  /** Contenido anterior; null si el archivo no existía. Para revertir en el CLI. */
+  previous?: string | null;
+};
+
+export type AgentMode = "squad" | "chat";
+
+export type ChatTurn = {
+  role: "user" | "assistant";
+  content: string;
 };
 
 export type OrchestrateRequest = {
@@ -48,11 +61,62 @@ export type OrchestrateRequest = {
   workspaceDir?: string;
   maxRetries?: number;
   permissions?: Partial<AgentPermissions>;
+  /** squad = jefe/worker/QA. chat = un solo modelo. Ambos pueden escribir archivos. */
+  mode?: AgentMode;
+  /** Historial corto para el modo chat. */
+  history?: ChatTurn[];
 };
 
 export type OrchestrateResponse = {
   status: JobStatus;
   summary: string;
   changes: FileChange[];
+  /** Timeline del job para pintarlo en CLI/frontend. */
+  trace: TraceEvent[];
   error?: string;
 };
+
+export type AppSettings = {
+  bossModel: string;
+  workerModel: string;
+  workspaceDir: string;
+  maxRetries: number;
+};
+
+export type ApiKeyPublic = {
+  id: string;
+  label: string;
+  apiKeySet: boolean;
+  apiKeyMasked: string;
+  baseUrl: string;
+};
+
+export type ConfigPublic = {
+  settings: AppSettings;
+  keys: ApiKeyPublic[];
+};
+
+export type ConfigPatch = {
+  settings?: Partial<AppSettings>;
+  keys?: Array<{
+    id: string;
+    label?: string;
+    apiKey?: string;
+    baseUrl?: string;
+  }>;
+};
+
+/** Respuesta de estado para health checks. Serializable a JSON. */
+export interface StatusResponse {
+  ok: boolean;
+  message: string;
+  checkedAt: string;
+  service?: string;
+  version?: string;
+  database?: "connected" | "disconnected";
+  agents?: Array<{
+    id: string;
+    name: string;
+    status: string;
+  }>;
+}

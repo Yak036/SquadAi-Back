@@ -15,6 +15,12 @@ const IGNORED_DIR_NAMES = new Set([
 const SECRET_NAME = /^(?:\.env(?:\..*)?|credentials\.json|.*\.pem)$/i;
 const MAX_TREE_ENTRIES = 200;
 const MAX_FILE_BYTES = 80_000;
+const MAX_WALK_FILES = 2_000;
+const MAX_GLOB_HITS = 100;
+const MAX_GREP_HITS = 100;
+const MAX_READ_LINES = 2_000;
+const MAX_READ_BYTES = 50 * 1024;
+const MAX_LINE_CHARS = 2_000;
 
 /**
  * I/O acotado al workspace elegido por el usuario.
@@ -99,6 +105,11 @@ export class FileService {
 
     const abs = this.resolveSafe(inputPath);
     const already = await this.exists(inputPath);
+    let previous: string | null = null;
+    if (already) {
+      const buf = await fs.readFile(abs);
+      previous = buf.byteLength > 256_000 ? null : buf.toString("utf8");
+    }
     const dir = path.dirname(abs);
 
     if (dir !== this.root) {
@@ -116,7 +127,7 @@ export class FileService {
 
     await fs.writeFile(abs, code, "utf8");
     const action: ChangeAction = already ? "modified" : "created";
-    return { action, file: this.toRelative(abs), path: abs };
+    return { action, file: this.toRelative(abs), path: abs, previous };
   }
 
   /** Árbol plano para darle contexto al Jefe (sin node_modules/.git/secretos). */
@@ -126,6 +137,123 @@ export class FileService {
     if (names.length === 0) return "(workspace vacío)";
     const extra = names.length >= MAX_TREE_ENTRIES ? `\n… (${names.length}+ recortado)` : "";
     return names.join("\n") + extra;
+  }
+
+  /**
+   * Paths relativas que matchean un glob. `*.ts` también pega en subcarpetas.
+   * Tope 100 hits; no entra a node_modules/.git/dist.
+   */
+  async glob(pattern: string): Promise<string> {
+    const files: string[] = [];
+    await this.walkFiles(this.root, files);
+    const re = globToRegExp(pattern);
+    const hits: string[] = [];
+    let extra = 0;
+    for (const rel of files) {
+      if (!re.test(rel)) continue;
+      if (hits.length < MAX_GLOB_HITS) hits.push(rel);
+      else extra += 1;
+    }
+    if (!hits.length) return "(sin matches)";
+    const tail = extra ? `\n… (${extra} más, recortado)` : "";
+    return hits.join("\n") + tail;
+  }
+
+  /**
+   * Lectura paginada para el modelo: líneas numeradas, 50 KB / 2000 líneas.
+   */
+  async readSlice(inputPath: string, offset = 1, limit = MAX_READ_LINES): Promise<string> {
+    const abs = this.resolveSafe(inputPath);
+    const buf = await fs.readFile(abs);
+    const lines = buf.toString("utf8").split("\n");
+    const start = Math.max(0, Math.trunc(offset) - 1);
+    const take = Math.min(MAX_READ_LINES, Math.max(1, Math.trunc(limit) || MAX_READ_LINES));
+    if (start >= lines.length) {
+      return `(offset ${start + 1} fuera de rango, el archivo tiene ${lines.length} líneas)`;
+    }
+
+    const out: string[] = [];
+    let bytes = 0;
+    let cut = false;
+    for (let i = 0; i < take; i++) {
+      const idx = start + i;
+      if (idx >= lines.length) break;
+      let body = lines[idx] ?? "";
+      if (body.length > MAX_LINE_CHARS) body = body.slice(0, MAX_LINE_CHARS) + "…";
+      const row = `${idx + 1}: ${body}`;
+      const size = Buffer.byteLength(row, "utf8") + 1;
+      if (bytes + size > MAX_READ_BYTES) {
+        cut = true;
+        break;
+      }
+      out.push(row);
+      bytes += size;
+    }
+
+    const last = start + out.length;
+    if (cut) out.push(`… cortado a 50KB. Seguí con offset=${last + 1}`);
+    else if (last < lines.length) out.push(`… hay más. Seguí con offset=${last + 1}`);
+    return out.join("\n");
+  }
+
+  /**
+   * Busca un regex en el workspace. include es glob opcional (ej. *.ts).
+   */
+  async grep(pattern: string, include?: string): Promise<string> {
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern);
+    } catch {
+      return "regex inválida";
+    }
+    const files: string[] = [];
+    await this.walkFiles(this.root, files);
+    const filter = include?.trim() ? globToRegExp(include) : null;
+    const hits: string[] = [];
+
+    for (const rel of files) {
+      if (filter && !filter.test(rel)) continue;
+      let text: string;
+      try {
+        const abs = path.join(this.root, rel);
+        const st = await fs.stat(abs);
+        if (st.size > MAX_FILE_BYTES) continue;
+        text = await fs.readFile(abs, "utf8");
+      } catch {
+        continue;
+      }
+      const rows = text.split("\n");
+      for (let i = 0; i < rows.length; i++) {
+        const line = rows[i] ?? "";
+        if (!re.test(line)) continue;
+        const clipped = line.length > 200 ? line.slice(0, 200) + "…" : line;
+        hits.push(`${rel}:${i + 1}:${clipped}`);
+        if (hits.length >= MAX_GREP_HITS) {
+          return hits.join("\n") + "\n… recortado";
+        }
+      }
+    }
+    return hits.length ? hits.join("\n") : "(sin matches)";
+  }
+
+  private async walkFiles(dir: string, out: string[]): Promise<void> {
+    if (out.length >= MAX_WALK_FILES) return;
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= MAX_WALK_FILES) return;
+      if (IGNORED_DIR_NAMES.has(entry.name) || SECRET_NAME.test(entry.name)) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await this.walkFiles(abs, out);
+        continue;
+      }
+      if (entry.isFile()) out.push(path.relative(this.root, abs));
+    }
   }
 
   private async walk(dir: string, out: string[]): Promise<void> {
@@ -153,4 +281,18 @@ export class FileService {
       if (entry.isFile()) out.push(rel);
     }
   }
+}
+
+/** `*.ts` → también matchea `src/a.ts` y `a.ts` en la raíz. Sin minimatch. */
+export function globToRegExp(pattern: string): RegExp {
+  const raw = pattern.trim() || "**/*";
+  const body = raw
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*\//g, "\0")
+    .replace(/\*\*/g, ".*")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\0/g, "(?:.*/)?")
+    .replace(/\?/g, "[^/]");
+  if (!raw.includes("/")) return new RegExp(`(?:^|/)${body}$`);
+  return new RegExp(`^${body}$`);
 }

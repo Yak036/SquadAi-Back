@@ -1,7 +1,9 @@
-import { env } from "../config/env.js";
+import { getSettings } from "../services/configService.js";
 import type { WorkerFile } from "../types.js";
 import { AppError } from "../utils/errors.js";
-import { chatJson } from "./llm.js";
+import { parseLlmJson, recoverRawFile } from "../utils/json.js";
+import { log } from "../utils/logger.js";
+import { chatText } from "./llm.js";
 
 const WORKER_SYSTEM = `Eres el Trabajador: generas el contenido COMPLETO de un archivo.
 Responde ÚNICAMENTE un JSON (sin markdown, sin backticks) con esta forma exacta:
@@ -13,6 +15,7 @@ Responde ÚNICAMENTE un JSON (sin markdown, sin backticks) con esta forma exacta
 Reglas:
 - code es el archivo entero, no un diff
 - Escapa bien saltos de línea y comillas dentro de code (JSON válido)
+- Si el archivo es markdown, los fences \`\`\`bash / \`\`\`ts van DENTRO de code como texto. El JSON exterior NUNCA lleva backticks.
 - No inventes dependencias que no estén en la spec
 - Si hay feedback de QA, corrige exactamente eso y reescribe el archivo completo`;
 
@@ -33,6 +36,7 @@ export async function generateFile(input: {
   specification: string;
   existingCode?: string;
   feedback?: string;
+  signal?: AbortSignal;
 }): Promise<WorkerFile> {
   const parts = [
     `REQUERIMIENTO:\n${input.requirement}`,
@@ -46,13 +50,28 @@ export async function generateFile(input: {
     parts.push(`FEEDBACK DE QA (corrige esto):\n${input.feedback}`);
   }
 
-  const raw = await chatJson<unknown>({
-    model: env.workerModel,
+  const chat: Parameters<typeof chatText>[0] = {
+    model: getSettings().workerModel,
     messages: [
       { role: "system", content: WORKER_SYSTEM },
       { role: "user", content: parts.join("\n\n") },
     ],
-  });
+  };
+  if (input.signal) chat.signal = input.signal;
+  const { content } = await chatText(chat);
+
+  let raw: unknown;
+  try {
+    raw = parseLlmJson(content);
+  } catch {
+    // ponytail: DeepSeek a veces tira el .md/.ts crudo en vez del envelope JSON
+    const recovered = recoverRawFile(content);
+    if (recovered) {
+      log.warn("worker: JSON inválido, usando cuerpo crudo para", input.filepath);
+      return { filepath: input.filepath, code: recovered };
+    }
+    throw new AppError(`JSON inválido del LLM: ${content.trim().slice(0, 240)}`, 502);
+  }
 
   const file = asWorkerFile(raw);
   // El trabajador a veces cambia el path; nos quedamos con el pedido por el plan.
