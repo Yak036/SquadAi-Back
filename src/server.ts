@@ -10,8 +10,16 @@ import {
   putKey,
 } from "./controllers/configController.js";
 import { postOrchestrate, postOrchestrateStream } from "./controllers/orchestrateController.js";
+import {
+  listRules,
+  listActiveRules,
+  getRule,
+  postRule,
+  putRule,
+  deleteRuleHandler,
+} from "./controllers/rulesController.js";
 import { initDb } from "./db/sqlite.js";
-import { hasDeepSeekKey } from "./services/configService.js";
+import { getSettings, hasLlmKey } from "./services/configService.js";
 import { AppError } from "./utils/errors.js";
 import { log } from "./utils/logger.js";
 
@@ -22,7 +30,10 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, deepseek: hasDeepSeekKey() });
+  const llm = hasLlmKey();
+  const provider = getSettings().activeProvider;
+  // deepseek = alias de llm: el Hud viejo todavía lo lee.
+  res.json({ ok: true, llm, provider, deepseek: llm });
 });
 
 app.get("/api/config", getConfig);
@@ -33,6 +44,13 @@ app.delete("/api/config/keys/:id", deleteKey);
 
 app.post("/api/orchestrate", postOrchestrate);
 app.post("/api/orchestrate/stream", postOrchestrateStream);
+
+app.get("/api/rules", listRules);
+app.get("/api/rules/active", listActiveRules);
+app.get("/api/rules/:id", getRule);
+app.post("/api/rules", postRule);
+app.put("/api/rules/:id", putRule);
+app.delete("/api/rules/:id", deleteRuleHandler);
 
 app.use((_req, res) => {
   res.status(404).json({ status: "failed", summary: "Ruta no encontrada", changes: [], trace: [] });
@@ -54,5 +72,5 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(env.port, () => {
   log.info(`API en http://localhost:${env.port}`);
-  if (!hasDeepSeekKey()) log.warn("DeepSeek API key pendiente: PUT /api/config/keys/deepseek");
+  if (!hasLlmKey()) log.warn(`API key pendiente: PUT /api/config/keys/${getSettings().activeProvider}`);
 });

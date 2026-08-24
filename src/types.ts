@@ -3,7 +3,9 @@
  * Todo intercambio entre agentes debe caber en estos tipos.
  */
 
-import type { TraceEvent } from "./utils/logger.js";
+import type { TokenUsage, TraceEvent } from "./utils/logger.js";
+
+export type { TokenUsage };
 
 export type FileAction = "create" | "modify";
 export type ChangeAction = "created" | "modified";
@@ -49,6 +51,39 @@ export type FileChange = {
   previous?: string | null;
 };
 
+export type RuleScope = "global" | "boss" | "worker" | "qa" | "chat";
+
+export type Rule = {
+  id: string;
+  scope: RuleScope;
+  label: string;
+  content: string;
+  enabled: boolean;
+  priority: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RuleCreate = {
+  scope?: RuleScope;
+  label: string;
+  content: string;
+  priority?: number;
+};
+
+export type RulePatch = {
+  scope?: RuleScope;
+  label?: string;
+  content?: string;
+  enabled?: boolean;
+  priority?: number;
+};
+
+export type ActiveRules = {
+  global: Rule[];
+  scoped: Rule[];
+};
+
 export type AgentMode = "squad" | "chat";
 
 export type ChatTurn = {
@@ -73,6 +108,8 @@ export type OrchestrateResponse = {
   changes: FileChange[];
   /** Timeline del job para pintarlo en CLI/frontend. */
   trace: TraceEvent[];
+  /** Suma de usage de todas las llamadas LLM de este job. */
+  usage?: TokenUsage;
   error?: string;
 };
 
@@ -81,6 +118,8 @@ export type AppSettings = {
   workerModel: string;
   workspaceDir: string;
   maxRetries: number;
+  /** id de api_keys: openai, anthropic, deepinfra, deepseek, o uno custom. */
+  activeProvider: string;
 };
 
 export type ApiKeyPublic = {

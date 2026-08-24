@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { isLocalOllama, presetFor, PROVIDER_PRESETS } from "../config/providers.js";
 import { getDb } from "../db/sqlite.js";
 import type { ApiKeyPublic, AppSettings, ConfigPublic } from "../types.js";
 import { AppError } from "../utils/errors.js";
@@ -7,7 +8,14 @@ import { isUsableKey, looksMasked, maskSecret } from "../utils/secrets.js";
 type SettingRow = { key: string; value: string };
 type KeyRow = { id: string; label: string; api_key: string; base_url: string };
 
-const SETTING_KEYS = ["bossModel", "workerModel", "workspaceDir", "maxRetries"] as const;
+const SETTING_KEYS = ["bossModel", "workerModel", "workspaceDir", "maxRetries", "activeProvider"] as const;
+
+export type ResolvedLlm = {
+  id: string;
+  label: string;
+  apiKey: string;
+  baseUrl: string;
+};
 
 export function getSettings(): AppSettings {
   const rows = getDb().prepare("SELECT key, value FROM settings").all() as SettingRow[];
@@ -18,6 +26,7 @@ export function getSettings(): AppSettings {
     workerModel: map.get("workerModel") || env.workerModel,
     workspaceDir: map.get("workspaceDir") ?? env.workspaceDir,
     maxRetries: Number.isFinite(maxRetries) ? maxRetries : 3,
+    activeProvider: (map.get("activeProvider") || env.activeProvider || "deepseek").trim().toLowerCase(),
   };
 }
 
@@ -25,6 +34,27 @@ export function getApiKeyRow(id: string): KeyRow | undefined {
   return getDb().prepare("SELECT id, label, api_key, base_url FROM api_keys WHERE id = ?").get(id) as
     | KeyRow
     | undefined;
+}
+
+function envKeyFor(id: string): string {
+  if (id === "deepseek") return isUsableKey(env.deepseekApiKey) ? env.deepseekApiKey : "";
+  return "";
+}
+
+/** Key + baseURL del proveedor activo. Env solo siembra DeepSeek. */
+export function resolveLlm(): ResolvedLlm {
+  const id = getSettings().activeProvider || "deepseek";
+  const preset = presetFor(id);
+  const row = getApiKeyRow(id);
+  const baseUrl = (row?.base_url.trim() || preset?.baseUrl || "").replace(/\/$/, "");
+  let apiKey = row && isUsableKey(row.api_key) ? row.api_key : envKeyFor(id);
+  if (isLocalOllama(id, baseUrl) && !isUsableKey(apiKey)) apiKey = "ollama";
+  return {
+    id,
+    label: row?.label || preset?.label || id,
+    apiKey,
+    baseUrl,
+  };
 }
 
 export function resolveDeepseekKey(): string {
@@ -39,15 +69,23 @@ export function resolveDeepseekBaseUrl(): string {
   return env.deepseekBaseUrl;
 }
 
+export function hasLlmKey(): boolean {
+  const llm = resolveLlm();
+  if (!llm.baseUrl) return false;
+  if (isLocalOllama(llm.id, llm.baseUrl)) return true;
+  return isUsableKey(llm.apiKey);
+}
+
+/** Alias: health viejo y clientes que preguntaban por DeepSeek. */
 export function hasDeepSeekKey(): boolean {
-  return isUsableKey(resolveDeepseekKey());
+  return hasLlmKey();
 }
 
 function toPublicKey(row: KeyRow): ApiKeyPublic {
   return {
     id: row.id,
     label: row.label,
-    apiKeySet: isUsableKey(row.api_key),
+    apiKeySet: isUsableKey(row.api_key) || isLocalOllama(row.id, row.base_url),
     apiKeyMasked: maskSecret(row.api_key),
     baseUrl: row.base_url,
   };
@@ -78,6 +116,9 @@ export function patchSettings(partial: Partial<AppSettings>): AppSettings {
   if (typeof partial.maxRetries === "number" && Number.isFinite(partial.maxRetries)) {
     next.maxRetries = Math.min(5, Math.max(1, Math.trunc(partial.maxRetries)));
   }
+  if (typeof partial.activeProvider === "string" && partial.activeProvider.trim()) {
+    next.activeProvider = partial.activeProvider.trim().toLowerCase();
+  }
 
   for (const key of SETTING_KEYS) {
     stmt.run({ key, value: String(next[key]) });
@@ -96,14 +137,21 @@ export function upsertApiKey(input: {
     throw new AppError("id de proveedor inválido", 400);
   }
 
+  const preset = presetFor(id);
   const existing = getApiKeyRow(id);
   let apiKey = existing?.api_key ?? "";
   if (typeof input.apiKey === "string" && input.apiKey.trim() && !looksMasked(input.apiKey)) {
     apiKey = input.apiKey.trim();
   }
 
-  const label = input.label?.trim() || existing?.label || id;
-  const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : (existing?.base_url ?? "");
+  const label = input.label?.trim() || existing?.label || preset?.label || id;
+  let baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : (existing?.base_url ?? "");
+  if (!baseUrl && preset) baseUrl = preset.baseUrl;
+  if (!baseUrl) {
+    throw new AppError("baseUrl obligatorio para un proveedor custom (ej. https://api.foo/v1)", 400);
+  }
+
+  if (isLocalOllama(id, baseUrl) && !isUsableKey(apiKey)) apiKey = "ollama";
 
   getDb()
     .prepare(
@@ -129,4 +177,9 @@ export function clearApiKey(id: string): ApiKeyPublic {
     .prepare(`UPDATE api_keys SET api_key = '', updated_at = datetime('now') WHERE id = ?`)
     .run(id);
   return toPublicKey({ ...row, api_key: "" });
+}
+
+/** Lista de presets conocidos (para /provider y docs). */
+export function listProviderPresets(): typeof PROVIDER_PRESETS {
+  return PROVIDER_PRESETS;
 }

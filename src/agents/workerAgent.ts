@@ -1,4 +1,5 @@
 import { getSettings } from "../services/configService.js";
+import { buildRulesBlock, getActiveRules } from "../services/rulesService.js";
 import type { WorkerFile } from "../types.js";
 import { AppError } from "../utils/errors.js";
 import { parseLlmJson, recoverRawFile } from "../utils/json.js";
@@ -37,6 +38,7 @@ export async function generateFile(input: {
   existingCode?: string;
   feedback?: string;
   signal?: AbortSignal;
+  onUsage?: Parameters<typeof chatText>[0]["onUsage"];
 }): Promise<WorkerFile> {
   const parts = [
     `REQUERIMIENTO:\n${input.requirement}`,
@@ -50,14 +52,18 @@ export async function generateFile(input: {
     parts.push(`FEEDBACK DE QA (corrige esto):\n${input.feedback}`);
   }
 
+  const rulesBlock = buildRulesBlock(getActiveRules("worker"));
+  const systemPrompt = WORKER_SYSTEM + rulesBlock;
+
   const chat: Parameters<typeof chatText>[0] = {
     model: getSettings().workerModel,
     messages: [
-      { role: "system", content: WORKER_SYSTEM },
+      { role: "system", content: systemPrompt },
       { role: "user", content: parts.join("\n\n") },
     ],
   };
   if (input.signal) chat.signal = input.signal;
+  if (input.onUsage) chat.onUsage = input.onUsage;
   const { content } = await chatText(chat);
 
   let raw: unknown;

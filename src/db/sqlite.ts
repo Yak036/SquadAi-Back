@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { env } from "../config/env.js";
+import { PROVIDER_PRESETS } from "../config/providers.js";
 import { isUsableKey } from "../utils/secrets.js";
 
 type SqliteDb = InstanceType<typeof Database>;
@@ -47,6 +48,17 @@ function migrate(d: SqliteDb): void {
       base_url TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS rules (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL DEFAULT 'global',
+      label TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      priority INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 }
 
@@ -60,17 +72,19 @@ function seedFromEnv(d: SqliteDb): void {
   insertSetting.run({ key: "workerModel", value: env.workerModel });
   insertSetting.run({ key: "workspaceDir", value: env.workspaceDir });
   insertSetting.run({ key: "maxRetries", value: String(env.maxRetries) });
+  insertSetting.run({ key: "activeProvider", value: env.activeProvider });
 
-  const existing = d.prepare("SELECT id FROM api_keys WHERE id = ?").get("deepseek");
-  if (!existing) {
-    d.prepare(
-      `INSERT INTO api_keys (id, label, api_key, base_url, updated_at)
-       VALUES (@id, @label, @api_key, @base_url, datetime('now'))`,
-    ).run({
-      id: "deepseek",
-      label: "DeepSeek",
-      api_key: isUsableKey(env.deepseekApiKey) ? env.deepseekApiKey : "",
-      base_url: env.deepseekBaseUrl,
+  const insertKey = d.prepare(
+    `INSERT OR IGNORE INTO api_keys (id, label, api_key, base_url, updated_at)
+     VALUES (@id, @label, @api_key, @base_url, datetime('now'))`,
+  );
+  for (const p of PROVIDER_PRESETS) {
+    const fromEnv = p.id === "deepseek" && isUsableKey(env.deepseekApiKey) ? env.deepseekApiKey : "";
+    insertKey.run({
+      id: p.id,
+      label: p.label,
+      api_key: fromEnv,
+      base_url: p.id === "deepseek" ? env.deepseekBaseUrl : p.baseUrl,
     });
   }
 }

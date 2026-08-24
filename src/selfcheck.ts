@@ -9,9 +9,10 @@ import os from "node:os";
 import path from "node:path";
 import { initDb } from "./db/sqlite.js";
 import { FileService, globToRegExp } from "./services/fileService.js";
-import { getPublicConfig, upsertApiKey } from "./services/configService.js";
+import { getPublicConfig, getSettings, hasLlmKey, patchSettings, upsertApiKey } from "./services/configService.js";
 import { extractJsonSlice, parseLlmJson, recoverRawFile } from "./utils/json.js";
 import { looksMasked, maskSecret } from "./utils/secrets.js";
+import { addUsage, emptyUsage, fmtTok, formatUsage } from "./utils/logger.js";
 
 const fenced = '```json\n{"filepath":"a.ts","code":"ok"}\n```';
 assert.deepEqual(parseLlmJson(fenced), { filepath: "a.ts", code: "ok" });
@@ -60,7 +61,14 @@ const saved = upsertApiKey({
 });
 assert.equal(saved.apiKeySet, true);
 assert.equal(saved.apiKeyMasked.includes("1234"), true);
-assert.equal(getPublicConfig().keys[0]?.apiKeyMasked.includes("sk-"), true);
+assert.equal(getPublicConfig().keys.find((k) => k.id === "deepseek")?.apiKeyMasked.includes("sk-"), true);
+
+const openai = upsertApiKey({ id: "openai", apiKey: "sk-test-openai-abcdef" });
+assert.match(openai.baseUrl, /openai\.com/);
+assert.throws(() => upsertApiKey({ id: "mio", apiKey: "sk-x" }), /baseUrl/);
+patchSettings({ activeProvider: "openai" });
+assert.equal(getSettings().activeProvider, "openai");
+assert.equal(hasLlmKey(), true);
 
 const files = new FileService(tmp, { writeFiles: true, createDirs: true, runCommands: false });
 
@@ -103,5 +111,10 @@ live.abort();
 assert.throws(() => throwIfAborted(live.signal), /cancelado/);
 assert.equal(isCancelled(new Error("AbortError"), live.signal), true);
 assert.equal(cancelledResponse().status, "cancelled");
+
+const summed = addUsage(emptyUsage(), { prompt: 1000, completion: 250, total: 1250, estimated: false });
+assert.equal(summed.total, 1250);
+assert.equal(fmtTok(1200), "1.2k");
+assert.match(formatUsage(summed), /in 1\.0k/);
 
 console.log("selfcheck ok");

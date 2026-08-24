@@ -1,4 +1,5 @@
 import { getSettings } from "../services/configService.js";
+import { buildRulesBlock, getActiveRules } from "../services/rulesService.js";
 import type { PlanResult, QaResult, WorkerFile } from "../types.js";
 import { AppError } from "../utils/errors.js";
 import { chatJson } from "./llm.js";
@@ -75,11 +76,15 @@ export async function planWork(input: {
   requirement: string;
   tree: string;
   signal?: AbortSignal;
+  onUsage?: Parameters<typeof chatJson>[0]["onUsage"];
 }): Promise<{ plan: PlanResult; reasoning: string }> {
+  const rulesBlock = buildRulesBlock(getActiveRules("boss"));
+  const systemPrompt = PLAN_SYSTEM + rulesBlock;
+
   const chat: Parameters<typeof chatJson>[0] = {
     model: getSettings().bossModel,
     messages: [
-      { role: "system", content: PLAN_SYSTEM },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
         content: `REQUERIMIENTO:\n${input.requirement}\n\nÁRBOL DEL WORKSPACE:\n${input.tree}`,
@@ -87,6 +92,7 @@ export async function planWork(input: {
     ],
   };
   if (input.signal) chat.signal = input.signal;
+  if (input.onUsage) chat.onUsage = input.onUsage;
   const { data, reasoning } = await chatJson<unknown>(chat);
   return { plan: asPlan(data), reasoning };
 }
@@ -96,11 +102,15 @@ export async function reviewCode(input: {
   specification: string;
   generated: WorkerFile;
   signal?: AbortSignal;
+  onUsage?: Parameters<typeof chatJson>[0]["onUsage"];
 }): Promise<QaResult> {
+  const rulesBlock = buildRulesBlock(getActiveRules("qa"));
+  const systemPrompt = QA_SYSTEM + rulesBlock;
+
   const chat: Parameters<typeof chatJson>[0] = {
     model: getSettings().bossModel,
     messages: [
-      { role: "system", content: QA_SYSTEM },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
         content: [
@@ -113,6 +123,7 @@ export async function reviewCode(input: {
     ],
   };
   if (input.signal) chat.signal = input.signal;
+  if (input.onUsage) chat.onUsage = input.onUsage;
   const { data } = await chatJson<unknown>(chat);
   return asQa(data, input.generated.filepath);
 }

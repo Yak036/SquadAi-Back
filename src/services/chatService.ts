@@ -3,14 +3,15 @@
  * si el usuario lo pide. Sin jefe/QA. Pide contexto con glob/read/grep.
  */
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { chatTurn } from "../agents/llm.js";
-import type { FileChange, OrchestrateRequest, OrchestrateResponse } from "../types.js";
+import { addUsage, chatTurn, emptyUsage, formatUsage } from "../agents/llm.js";
+import type { FileChange, OrchestrateRequest, OrchestrateResponse, TokenUsage } from "../types.js";
 import { cancelledResponse, isCancelled } from "../utils/abort.js";
 import { AppError } from "../utils/errors.js";
 import { parseLlmJson, recoverRawFile } from "../utils/json.js";
 import { clip, createJobLog, type TraceEvent } from "../utils/logger.js";
 import { FileService } from "./fileService.js";
-import { getSettings, hasDeepSeekKey } from "./configService.js";
+import { getSettings, hasLlmKey } from "./configService.js";
+import { buildRulesBlock, getActiveRules } from "./rulesService.js";
 import { runWorkspaceTool, WORKSPACE_TOOLS } from "./workspaceTools.js";
 
 /** Mismo shape que OrchestrateHooks; se declara aquí para no ciclar con el orquestador. */
@@ -80,9 +81,14 @@ export async function runChat(
   const job = createJobLog(hooks.onEvent);
   const settings = getSettings();
   const signal = hooks.signal;
+  let jobUsage = emptyUsage();
+  const track = (u: TokenUsage): void => {
+    jobUsage = addUsage(jobUsage, u);
+    job.push("chat", "tokens", formatUsage(u), u);
+  };
 
-  if (!hasDeepSeekKey()) {
-    throw new AppError("API key de DeepSeek no configurada (usa PUT /api/config/keys/deepseek)", 503);
+  if (!hasLlmKey()) {
+    throw new AppError("API key del proveedor activo no configurada (usa /connect <id>)", 503);
   }
 
   const requirement = input.requirement.trim();
@@ -107,8 +113,11 @@ export async function runChat(
   job.push("chat", "pensando", `modelo ${settings.workerModel}`);
 
   // ponytail: el árbol iba acá y inflaba cada "hola". Squad sigue mandándolo al jefe.
+  const rulesBlock = buildRulesBlock(getActiveRules("chat"));
+  const systemPrompt = CHAT_SYSTEM + rulesBlock;
+
   const messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: CHAT_SYSTEM },
+    { role: "system", content: systemPrompt },
   ];
   for (const turn of input.history ?? []) {
     if (turn.role !== "user" && turn.role !== "assistant") continue;
@@ -131,6 +140,7 @@ export async function runChat(
         tools: WORKSPACE_TOOLS,
       };
       if (signal) turnArgs.signal = signal;
+      turnArgs.onUsage = track;
       const turn = await chatTurn(turnArgs);
 
       if (turn.toolCalls.length) {
@@ -203,5 +213,7 @@ export async function runChat(
   const summary = parsed.reply || (changes.length ? `Se escribieron ${changes.length} archivo(s).` : "Sin cambios");
 
   job.push("system", `tarea finalizada (${status})`, `${changes.length} archivo(s)`);
-  return { status, summary, changes, trace: job.events };
+  const out: OrchestrateResponse = { status, summary, changes, trace: job.events };
+  if (jobUsage.total) out.usage = jobUsage;
+  return out;
 }

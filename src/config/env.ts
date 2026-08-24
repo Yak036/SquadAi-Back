@@ -25,6 +25,8 @@ export const env = {
   workerModel: readString("WORKER_MODEL", "deepseek-chat"),
   workspaceDir: process.env.WORKSPACE_DIR?.trim() ?? "",
   maxRetries: readNumber("MAX_RETRIES", 3),
+  /** Semilla del proveedor activo; después vive en SQLite. */
+  activeProvider: readString("ACTIVE_PROVIDER", "deepseek"),
 };
 
 export function hasDeepSeekKey(): boolean {

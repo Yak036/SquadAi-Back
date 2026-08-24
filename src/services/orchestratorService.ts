@@ -1,5 +1,7 @@
 import { planWork, reviewCode } from "../agents/bossAgent.js";
+import { addUsage, emptyUsage, formatUsage } from "../agents/llm.js";
 import { generateFile } from "../agents/workerAgent.js";
+import type { TokenUsage } from "../types.js";
 import type {
   AgentPermissions,
   FileChange,
@@ -10,7 +12,7 @@ import { AppError } from "../utils/errors.js";
 import { cancelledResponse, isCancelled } from "../utils/abort.js";
 import { clip, createJobLog, type TraceEvent } from "../utils/logger.js";
 import { runChat } from "./chatService.js";
-import { getSettings, hasDeepSeekKey } from "./configService.js";
+import { getSettings, hasLlmKey } from "./configService.js";
 import { FileService } from "./fileService.js";
 
 const DEFAULT_PERMISSIONS: AgentPermissions = {
@@ -51,9 +53,14 @@ export async function runOrchestration(
   const job = createJobLog(hooks.onEvent);
   const settings = getSettings();
   const signal = hooks.signal;
+  let jobUsage = emptyUsage();
+  const track = (actor: "boss" | "worker" | "qa") => (u: TokenUsage) => {
+    jobUsage = addUsage(jobUsage, u);
+    job.push(actor, "tokens", formatUsage(u), u);
+  };
 
-  if (!hasDeepSeekKey()) {
-    throw new AppError("API key de DeepSeek no configurada (usa PUT /api/config/keys/deepseek)", 503);
+  if (!hasLlmKey()) {
+    throw new AppError("API key del proveedor activo no configurada (usa /connect <id>)", 503);
   }
 
   const requirement = input.requirement.trim();
@@ -88,9 +95,12 @@ export async function runOrchestration(
   let plan;
   let reasoning = "";
   try {
-    const planned = await planWork(
-      signal ? { requirement, tree, signal } : { requirement, tree },
-    );
+    const planned = await planWork({
+      requirement,
+      tree,
+      onUsage: track("boss"),
+      ...(signal ? { signal } : {}),
+    });
     plan = planned.plan;
     reasoning = planned.reasoning;
   } catch (err) {
@@ -151,6 +161,7 @@ export async function runOrchestration(
       if (existingCode) genArgs.existingCode = existingCode;
       if (lastError) genArgs.feedback = lastError;
       if (signal) genArgs.signal = signal;
+      genArgs.onUsage = track("worker");
 
       let generated;
       try {
@@ -169,9 +180,13 @@ export async function runOrchestration(
 
       let qa;
       try {
-        const qaArgs = signal
-          ? { requirement, specification: task.specification, generated, signal }
-          : { requirement, specification: task.specification, generated };
+        const qaArgs: Parameters<typeof reviewCode>[0] = {
+          requirement,
+          specification: task.specification,
+          generated,
+          onUsage: track("qa"),
+        };
+        if (signal) qaArgs.signal = signal;
         qa = await reviewCode(qaArgs);
       } catch (err) {
         if (isCancelled(err, signal)) {
@@ -208,6 +223,7 @@ export async function runOrchestration(
   }
 
   result.trace = job.events;
+  if (jobUsage.total) result.usage = jobUsage;
   const done =
     result.status === "success"
       ? `${result.changes.length} archivo(s) escrito(s)`
